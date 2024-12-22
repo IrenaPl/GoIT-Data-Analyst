@@ -1,0 +1,123 @@
+-- Conversion Rates by Date and Traffic Channels
+WITH session_events AS (
+  SELECT
+    TIMESTAMP_MICROS(event_timestamp) AS event_timestamp,
+    DATE(TIMESTAMP_MICROS(event_timestamp)) AS event_date, -- Extract event date
+    user_pseudo_id, -- Unique user ID
+    event_params[0].value.string_value AS session_id, -- Session ID
+    event_name, -- Event name
+    traffic_source.source AS source, -- Traffic source
+    traffic_source.medium AS medium, -- Traffic medium
+    traffic_source.name AS campaign -- Traffic campaign
+  FROM
+    `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*` -- Adjust dataset path
+  WHERE
+    _TABLE_SUFFIX BETWEEN '20210101' AND '20211231' -- Filter for 2021 data
+    AND event_name IN (
+      'session_start', 
+      'view_item', 
+      'add_to_cart', 
+      'begin_checkout', 
+      'purchase'
+    )
+),
+
+-- Count unique sessions by user and session ID
+unique_sessions AS (
+  SELECT
+    event_date,
+    source,
+    medium,
+    campaign,
+    COUNT(DISTINCT CONCAT(user_pseudo_id, session_id)) AS user_sessions_count -- Unique sessions
+  FROM
+    session_events
+  WHERE
+    event_name = 'session_start'
+  GROUP BY
+    event_date, source, medium, campaign
+),
+
+-- Calculate visit-to-cart conversion
+visit_to_cart AS (
+  SELECT
+    event_date,
+    source,
+    medium,
+    campaign,
+    COUNT(DISTINCT CONCAT(user_pseudo_id, session_id)) AS cart_add_sessions
+  FROM
+    session_events
+  WHERE
+    event_name = 'add_to_cart'
+  GROUP BY
+    event_date, source, medium, campaign
+),
+
+-- Calculate visit-to-checkout conversion
+visit_to_checkout AS (
+  SELECT
+    event_date,
+    source,
+    medium,
+    campaign,
+    COUNT(DISTINCT CONCAT(user_pseudo_id, session_id)) AS checkout_sessions
+  FROM
+    session_events
+  WHERE
+    event_name = 'begin_checkout'
+  GROUP BY
+    event_date, source, medium, campaign
+),
+
+-- Calculate visit-to-purchase conversion
+visit_to_purchase AS (
+  SELECT
+    event_date,
+    source,
+    medium,
+    campaign,
+    COUNT(DISTINCT CONCAT(user_pseudo_id, session_id)) AS purchase_sessions
+  FROM
+    session_events
+  WHERE
+    event_name = 'purchase'
+  GROUP BY
+    event_date, source, medium, campaign
+)
+
+-- Final output combining all conversion rates
+SELECT
+  us.event_date,
+  us.source,
+  us.medium,
+  us.campaign,
+  us.user_sessions_count,
+  ROUND((vc.cart_add_sessions * 100.0) / CASE us.user_sessions_count WHEN 0 THEN 1 ELSE us.user_sessions_count END  , 2) AS visit_to_cart, -- Cart conversion rate
+   ROUND((vco.checkout_sessions * 100.0) / CASE us.user_sessions_count WHEN 0 THEN 1 ELSE us.user_sessions_count END, 2) AS visit_to_checkout, -- Checkout conversion rate
+  ROUND((vp.purchase_sessions * 100.0) / CASE us.user_sessions_count WHEN 0 THEN 1 ELSE us.user_sessions_count END, 2) AS visit_to_purchase -- Purchase conversion rate
+FROM
+  unique_sessions us
+LEFT JOIN
+  visit_to_cart vc
+ON
+  us.event_date = vc.event_date
+  AND us.source = vc.source
+  AND us.medium = vc.medium
+  AND us.campaign = vc.campaign
+LEFT JOIN
+  visit_to_checkout vco
+ON
+  us.event_date = vco.event_date
+  AND us.source = vco.source
+  AND us.medium = vco.medium
+  AND us.campaign = vco.campaign
+LEFT JOIN
+  visit_to_purchase vp
+ON
+  us.event_date = vp.event_date
+  AND us.source = vp.source
+  AND us.medium = vp.medium
+  AND us.campaign = vp.campaign
+ORDER BY
+  us.event_date, us.source, us.medium, us.campaign;
