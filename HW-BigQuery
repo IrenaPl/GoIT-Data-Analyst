@@ -1,123 +1,216 @@
--- Conversion Rates by Date and Traffic Channels
+-- 1) Preparing data for BI reports (bigquery-public-data.ga4_obfuscated_sample_ecommerce - Big Query Console)
+SELECT
+  TIMESTAMP_MICROS(event_timestamp) AS event_timestamp, 
+  user_pseudo_id, 
+  (SELECT value.string_value 
+   FROM UNNEST(event_params) 
+   WHERE key = "ga_session_id") AS session_id, 
+  event_name, 
+  geo.country AS country, 
+  device.category AS device_category, 
+  traffic_source.source AS source, 
+  traffic_source.medium AS medium, 
+  traffic_source.name AS campaign 
+FROM
+  `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*` 
+WHERE
+  _TABLE_SUFFIX BETWEEN '20210101' AND '20211231' 
+  AND event_name IN (
+    'session_start', 
+    'view_item', 
+    'add_to_cart', 
+    'begin_checkout', 
+    'add_shipping_info', 
+    'add_payment_info', 
+    'purchase'
+  );
+
+-- 2) Conversion Rates by Date and Traffic Channels
+-- Define CTEs for each step of the task
 WITH session_events AS (
   SELECT
-    TIMESTAMP_MICROS(event_timestamp) AS event_timestamp,
-    DATE(TIMESTAMP_MICROS(event_timestamp)) AS event_date, -- Extract event date
-    user_pseudo_id, -- Unique user ID
-    event_params[0].value.string_value AS session_id, -- Session ID
-    event_name, -- Event name
-    traffic_source.source AS source, -- Traffic source
-    traffic_source.medium AS medium, -- Traffic medium
-    traffic_source.name AS campaign -- Traffic campaign
+    TIMESTAMP_MICROS(event_timestamp) AS event_date,
+    traffic_source.source,
+    traffic_source.medium,
+    traffic_source.name,
+    user_pseudo_id,
+    event_params.value.string_value AS session_id,
+    event_name
   FROM
-    `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*` -- Adjust dataset path
+    `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`, UNNEST(event_params) AS event_params
   WHERE
-    _TABLE_SUFFIX BETWEEN '20210101' AND '20211231' -- Filter for 2021 data
-    AND event_name IN (
-      'session_start', 
-      'view_item', 
-      'add_to_cart', 
-      'begin_checkout', 
-      'purchase'
-    )
+    _TABLE_SUFFIX BETWEEN '20210101' AND '20211231'
 ),
-
--- Count unique sessions by user and session ID
+-- Calculate unique user sessions
 unique_sessions AS (
   SELECT
     event_date,
     source,
     medium,
-    campaign,
-    COUNT(DISTINCT CONCAT(user_pseudo_id, session_id)) AS user_sessions_count -- Unique sessions
+    name,
+    COUNT(DISTINCT CONCAT(user_pseudo_id, session_id)) AS user_sessions_count
   FROM
     session_events
   WHERE
     event_name = 'session_start'
   GROUP BY
-    event_date, source, medium, campaign
+    event_date, source, medium, name
 ),
-
--- Calculate visit-to-cart conversion
+-- Alias for unique_sessions for better visibility
+unique_sessions_alias AS (
+  SELECT * FROM unique_sessions AS us
+),
+-- Calculate sessions with add_to_cart events
 visit_to_cart AS (
   SELECT
     event_date,
     source,
     medium,
-    campaign,
+    name,
     COUNT(DISTINCT CONCAT(user_pseudo_id, session_id)) AS cart_add_sessions
   FROM
     session_events
   WHERE
     event_name = 'add_to_cart'
   GROUP BY
-    event_date, source, medium, campaign
+    event_date, source, medium, name
 ),
-
--- Calculate visit-to-checkout conversion
+-- Alias for visit_to_cart for better visibility
+visit_to_cart_alias AS (
+  SELECT * FROM visit_to_cart AS vc
+),
+-- Calculate sessions with begin_checkout events
 visit_to_checkout AS (
   SELECT
     event_date,
     source,
     medium,
-    campaign,
+    name,
     COUNT(DISTINCT CONCAT(user_pseudo_id, session_id)) AS checkout_sessions
   FROM
     session_events
   WHERE
     event_name = 'begin_checkout'
   GROUP BY
-    event_date, source, medium, campaign
+    event_date, source, medium, name
 ),
-
--- Calculate visit-to-purchase conversion
+-- Alias for visit_to_checkout for better visibility
+visit_to_checkout_alias AS (
+  SELECT * FROM visit_to_checkout AS vco
+),
+-- Calculate sessions with purchase events
 visit_to_purchase AS (
   SELECT
     event_date,
     source,
     medium,
-    campaign,
+    name,
     COUNT(DISTINCT CONCAT(user_pseudo_id, session_id)) AS purchase_sessions
   FROM
     session_events
   WHERE
     event_name = 'purchase'
   GROUP BY
-    event_date, source, medium, campaign
+    event_date, source, medium, name
+),
+-- Alias for visit_to_purchase for better visibility
+visit_to_purchase_alias AS (
+  SELECT * FROM visit_to_purchase AS vp
 )
-
 -- Final output combining all conversion rates
 SELECT
   us.event_date,
   us.source,
   us.medium,
-  us.campaign,
+  us.name,
   us.user_sessions_count,
-  ROUND((vc.cart_add_sessions * 100.0) / CASE us.user_sessions_count WHEN 0 THEN 1 ELSE us.user_sessions_count END  , 2) AS visit_to_cart, -- Cart conversion rate
-   ROUND((vco.checkout_sessions * 100.0) / CASE us.user_sessions_count WHEN 0 THEN 1 ELSE us.user_sessions_count END, 2) AS visit_to_checkout, -- Checkout conversion rate
-  ROUND((vp.purchase_sessions * 100.0) / CASE us.user_sessions_count WHEN 0 THEN 1 ELSE us.user_sessions_count END, 2) AS visit_to_purchase -- Purchase conversion rate
+  -- Calculate visit-to-cart conversion rate
+  ROUND((vc.cart_add_sessions * 100.0) / CASE us.user_sessions_count WHEN 0 THEN 1 ELSE us.user_sessions_count END, 2) AS visit_to_cart,
+  -- Calculate visit-to-checkout conversion rate
+  ROUND((vco.checkout_sessions * 100.0) / CASE us.user_sessions_count WHEN 0 THEN 1 ELSE us.user_sessions_count END, 2) AS visit_to_checkout,
+  -- Calculate visit-to-purchase conversion rate
+  ROUND((vp.purchase_sessions * 100.0) / CASE us.user_sessions_count WHEN 0 THEN 1 ELSE us.user_sessions_count END, 2) AS visit_to_purchase
 FROM
   unique_sessions us
-LEFT JOIN
-  visit_to_cart vc
-ON
-  us.event_date = vc.event_date
-  AND us.source = vc.source
-  AND us.medium = vc.medium
-  AND us.campaign = vc.campaign
-LEFT JOIN
-  visit_to_checkout vco
-ON
-  us.event_date = vco.event_date
-  AND us.source = vco.source
-  AND us.medium = vco.medium
-  AND us.campaign = vco.campaign
-LEFT JOIN
-  visit_to_purchase vp
-ON
-  us.event_date = vp.event_date
-  AND us.source = vp.source
-  AND us.medium = vp.medium
-  AND us.campaign = vp.campaign
+  LEFT JOIN visit_to_cart_alias vc
+    ON us.event_date = vc.event_date
+    AND us.source = vc.source
+    AND us.medium = vc.medium
+    AND us.name = vc.name
+  LEFT JOIN visit_to_checkout_alias vco
+    ON us.event_date = vco.event_date
+    AND us.source = vco.source
+    AND us.medium = vco.medium
+    AND us.name = vco.name
+  LEFT JOIN visit_to_purchase_alias vp
+    ON us.event_date = vp.event_date
+    AND us.source = vp.source
+    AND us.medium = vp.medium
+    AND us.name = vp.name
 ORDER BY
-  us.event_date, us.source, us.medium, us.campaign;
+  us.event_date,
+  us.source,
+  us.medium,
+  us.name;
+
+-- 3. Extract unique page paths, user sessions, purchases, and calculate conversion rates
+WITH session_start_events AS (
+  SELECT
+    DATE(TIMESTAMP_MICROS(event_timestamp)) AS event_date,
+    REGEXP_EXTRACT(event_params.value.string_value, r'^([^?]+)') AS page_path, -- Extract page path from page_location
+    user_pseudo_id,
+    event_params.value.string_value AS session_id
+  FROM
+    `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`, UNNEST(event_params) AS event_params
+  WHERE
+    _TABLE_SUFFIX BETWEEN '20200101' AND '20201231'
+    AND event_name = 'session_start'
+    AND event_params.key = 'page_location'
+),
+
+-- Extract purchase events
+purchase_events AS (
+  SELECT
+    user_pseudo_id,
+    event_params.value.string_value AS session_id,
+    COUNT(1) AS purchase_count
+  FROM
+    `bigquery-public-data.ga4_obfuscated_sample_ecommerce.events_*`, UNNEST(event_params) AS event_params
+  WHERE
+    _TABLE_SUFFIX BETWEEN '20200101' AND '20201231'
+    AND event_name = 'purchase'
+  GROUP BY
+    user_pseudo_id, session_id
+),
+
+sessions_with_purchases AS (
+  -- Join session start events with purchase events on user_pseudo_id and session_id
+  SELECT
+    s.event_date,
+    s.page_path,
+    COUNT(DISTINCT CONCAT(s.user_pseudo_id, s.session_id)) AS unique_sessions,
+    COALESCE(SUM(p.purchase_count), 0) AS purchase_count
+  FROM
+    session_start_events s
+  LEFT JOIN
+    purchase_events p
+  ON
+    s.user_pseudo_id = p.user_pseudo_id
+    AND s.session_id = p.session_id
+  GROUP BY
+    s.event_date, s.page_path
+)
+
+-- Final output
+SELECT
+  page_path,
+  SUM(unique_sessions) AS total_unique_sessions,
+  SUM(purchase_count) AS total_purchases,
+  ROUND((SUM(purchase_count) * 100.0) / CASE WHEN SUM(unique_sessions) = 0 THEN 1 ELSE SUM(unique_sessions) END, 2) AS session_to_purchase_conversion
+FROM
+  sessions_with_purchases
+GROUP BY
+  page_path
+ORDER BY
+  session_to_purchase_conversion DESC;
+
